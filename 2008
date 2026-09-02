@@ -1,0 +1,2565 @@
+repeat task.wait() until game:IsLoaded()
+
+local clientLoop = task.spawn(function()
+	while true do
+		pcall(function()
+			game:GetService("Players").LocalPlayer.PlayerScripts.ClientActor.ClientManager.Disabled = true
+		end)
+		task.wait()
+	end
+end)
+
+wait(2)
+
+local Meow = loadstring(game:HttpGet("https://raw.githubusercontent.com/regardments/2008/refs/heads/main/lib"))()
+
+local Library = Meow:CreateLib("2008", "Dark", "saveconfig")
+local Save = Library.SaveManager
+
+local Config = {
+	Name = "saveconfig",
+	Folder = "meow_saves"
+}
+
+Save:Load(Config.Name)
+
+pcall(function()
+	Library.ChangeTheme(Save:GetValue("theme", "Dark"))
+end)
+
+local Tabs = {
+	Main = Library.AddTab("Visuals"),
+	Removals = Library.AddTab("Removals"),
+	Player = Library.AddTab("Player"),
+	Combat = Library.AddTab("Mobs"),
+	Teleports = Library.AddTab("Teleports"),
+	Config = Library.AddTab("Config")
+}
+
+local Sections = {
+	Settings = Tabs.Main:NewSection("Esps"),
+	Removals = Tabs.Removals:NewSection("Removals"),
+	Player = Tabs.Player:NewSection("Movement"),
+	VoidMob = Tabs.Combat:NewSection("Void Mob"),
+    VoidTitus = Tabs.Combat:NewSection("Void Titus"),
+	Teleports = Tabs.Teleports:NewSection("Teleports"),
+	Config = Tabs.Config:NewSection("Config")
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
+local TextChatService = game:GetService("TextChatService")
+local LP = Players.LocalPlayer
+
+local BAR_W, BAR_GAP = 0.2, 0.05
+local segTI = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local ESP_RATE = 0.08
+local CHEST_RATE = 0.1
+local MOB_RATE = 0.15
+
+local Alive = true
+local InputConn
+local EspConn
+local ChestConn
+local MobConn
+local PlayerAddedConn
+local PlayerRemovingConn
+local lastEspTick = 0
+local lastChestTick = 0
+local lastMobTick = 0
+local ProximityConn
+local lastProxTick = 0
+local PROX_RATE = 0.1
+
+local EspData = {
+	Enabled = false,
+	Color = Color3.fromRGB(255, 255, 255),
+	ShowName = true,
+	ShowLevel = true,
+	ShowGuild = true,
+	ShowDistance = true,
+	ShowHealth = true,
+	ShowBox = true,
+	ShowHealthBar = true,
+	ShowStomachBar = true,
+	ShowWaterBar = true,
+	ShowEtherBar = true,
+	ShowPostureBar = true,
+	ShowBloodBar = true,
+	ShowArmorBar = true,
+	ShowSanityBar = true,
+	Distance = 5000,
+	Size = 1.0,
+	PerPlayer = {},
+	GuildCache = {}
+}
+
+local ChestESP = {
+	Enabled = false,
+	Distance = 5000,
+	PerChest = {},
+	Opened = {},
+	AddedConn = nil,
+	RemovedConn = nil,
+}
+
+local MobESP = {
+	Enabled = false,
+	Distance = 2500,
+	Color = Color3.fromRGB(0, 255, 0),
+	Highlight = true,
+	PerMob = {},
+	LiveAddedConn = nil,
+	LiveRemovedConn = nil,
+}
+
+local ProximityESP = {
+	Enabled = false,
+	Distance = 50,
+	Gui = nil,
+	Frame = nil,
+	List = nil,
+	DragConn1 = nil,
+	DragConn2 = nil,
+}
+
+local Move = {
+	Fly = false,
+	FlySpeed = Save:GetValue("fly_speed", 100),
+	FlyBind = Save:GetValue("fly_bind", "F4"),
+	Noclip = false,
+	FullNoclip = false,
+	NoclipBind = Save:GetValue("noclip_bind", "F4"),
+	BV = nil,
+	FlyConn = nil,
+	FlyRefresh = nil,
+	NoclipConn = nil,
+	NoclipOrig = {},
+	WorldOrig = {},
+	CharConn = nil
+}
+
+local Removals = {
+	NoFall = false,
+	NoFallHooked = false,
+	NoFog = false,
+	UnlockChat = false,
+	FogOriginals = {
+		FogStart = nil,
+		FogEnd = nil,
+		Density = nil,
+	},
+	FogStartConn = nil,
+	FogEndConn = nil,
+	AtmoDensityConn = nil,
+}
+
+local TeleportState = {
+	Loops = {},
+	Current = nil,
+}
+
+local PeerIdVM
+do
+	local temp = Instance.new("Part")
+	temp.Parent = workspace
+	PeerIdVM = gethiddenproperty(temp, "NetworkOwnerV3")
+	temp:Destroy()
+end
+
+local VoidMob = {
+	Enabled = false,
+	Conn = nil,
+	CharConn = nil,
+	Root = nil,
+	Hum = nil,
+}
+
+local function StopTeleportLoop(name)
+	TeleportState.Loops[name] = false
+end
+
+local function StopAllTeleportLoops()
+	for k in pairs(TeleportState.Loops) do
+		TeleportState.Loops[k] = false
+	end
+	TeleportState.Current = nil
+end
+
+local function StartTeleportLoop(name, targetPosition)
+	StopTeleportLoop(name)
+	TeleportState.Loops[name] = true
+	TeleportState.Current = name
+	task.spawn(function()
+		while TeleportState.Loops[name] do
+			task.wait(0)
+			if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+				LP.Character.HumanoidRootPart.CFrame = CFrame.new(targetPosition)
+			end
+		end
+	end)
+end
+
+local function VoidMobUpdateChar(char)
+	if not char then
+		VoidMob.Root = nil
+		VoidMob.Hum = nil
+		return
+	end
+	VoidMob.Root = char:WaitForChild("HumanoidRootPart", 5)
+	VoidMob.Hum = char:WaitForChild("Humanoid", 5)
+end
+
+local function StartVoidMob()
+	if not Alive then return end
+
+	pcall(function()
+		workspace.FallenPartsDestroyHeight = -10000
+	end)
+
+	if VoidMob.Conn then
+		pcall(function() VoidMob.Conn:Disconnect() end)
+		VoidMob.Conn = nil
+	end
+
+	if not VoidMob.CharConn then
+		VoidMob.CharConn = LP.CharacterAdded:Connect(function(char)
+			task.wait(0.3)
+			VoidMobUpdateChar(char)
+		end)
+	end
+
+	if LP.Character then
+		VoidMobUpdateChar(LP.Character)
+	end
+
+	VoidMob.Conn = RunService.Heartbeat:Connect(function()
+		pcall(function()
+			if not Alive or not VoidMob.Enabled then return end
+			if not VoidMob.Root or not VoidMob.Hum then return end
+
+			pcall(function() sethiddenproperty(LP, "MaxSimulationRadius", math.huge) end)
+			pcall(function() sethiddenproperty(LP, "SimulationRadius", math.huge) end)
+
+			local live = workspace:FindFirstChild("Live")
+			if not live then return end
+
+			for _, Child in pairs(live:GetChildren()) do
+				pcall(function()
+					if Child ~= LP.Character and Child:FindFirstChild("HumanoidRootPart") and not Child:FindFirstChild("InteractPrompt") and not Players:GetPlayerFromCharacter(Child) then
+						local VictimHumPart = Child.HumanoidRootPart
+						local Distance = (VoidMob.Root.Position - VictimHumPart.Position).Magnitude
+						if Distance <= 500 then
+							pcall(function() sethiddenproperty(VictimHumPart, "NetworkOwnerV3", PeerIdVM) end)
+							pcall(function()
+								if isnetworkowner(VictimHumPart) then
+									VictimHumPart.AssemblyLinearVelocity = Vector3.new(0, -7500, 0)
+									VictimHumPart.CFrame = VictimHumPart.CFrame * CFrame.new(0, -9500, 0)
+								end
+							end)
+						end
+					end
+				end)
+			end
+		end)
+	end)
+end
+
+local function StopVoidMob()
+	VoidMob.Enabled = false
+	if VoidMob.Conn then
+		pcall(function() VoidMob.Conn:Disconnect() end)
+		VoidMob.Conn = nil
+	end
+	if VoidMob.CharConn then
+		pcall(function() VoidMob.CharConn:Disconnect() end)
+		VoidMob.CharConn = nil
+	end
+	VoidMob.Root = nil
+	VoidMob.Hum = nil
+end
+
+local RayHook = {
+	Installed = false,
+	Handler = nil,
+	BaseNamecall = nil,
+}
+
+local NoFallHook = {
+	Installed = false,
+	Handler = nil,
+}
+
+local function RebuildNamecallHooks()
+	if type(hookmetamethod) ~= "function" or type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function" then
+		return false
+	end
+
+	if not RayHook.BaseNamecall then
+		local captured
+		local ok = pcall(function()
+			captured = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+				return captured(self, ...)
+			end))
+		end)
+		if not ok or not captured then return false end
+		RayHook.BaseNamecall = captured
+	end
+
+	local ok = pcall(function()
+		hookmetamethod(game, "__namecall", RayHook.BaseNamecall)
+		RayHook.Handler = nil
+		NoFallHook.Handler = nil
+
+		if RayHook.Installed then
+			local old = RayHook.BaseNamecall
+			RayHook.Handler = newcclosure(function(self, ...)
+				if Move.Noclip and Alive and getnamecallmethod() == "Raycast" then return nil end
+				return old(self, ...)
+			end)
+			hookmetamethod(game, "__namecall", RayHook.Handler)
+		end
+
+		if NoFallHook.Installed then
+			local old = RayHook.Installed and RayHook.Handler or RayHook.BaseNamecall
+			NoFallHook.Handler = newcclosure(function(self, ...)
+				if not Removals.NoFall or not Alive then return old(self, ...) end
+				local method = getnamecallmethod()
+				if method == "FireServer" and typeof(self) == "Instance" then
+					local args = {...}
+					if type(args[1]) == "number" and type(args[2]) == "boolean" and args[1] > 2 and args[2] == false then return end
+				end
+				return old(self, ...)
+			end)
+			hookmetamethod(game, "__namecall", NoFallHook.Handler)
+		end
+	end)
+
+	return ok
+end
+
+local function InstallRaycastHook()
+	if RayHook.Installed then return end
+	if type(hookmetamethod) ~= "function" or type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function" then return end
+	RayHook.Installed = true
+	if not RebuildNamecallHooks() then
+		RayHook.Installed = false
+		RebuildNamecallHooks()
+	end
+end
+
+local function RemoveRaycastHook()
+	if not RayHook.Installed then return end
+	RayHook.Installed = false
+	RebuildNamecallHooks()
+end
+
+local function InstallNoFallHook()
+	if NoFallHook.Installed then return end
+	if type(hookmetamethod) ~= "function" or type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function" then return end
+	NoFallHook.Installed = true
+	if not RebuildNamecallHooks() then
+		NoFallHook.Installed = false
+		RebuildNamecallHooks()
+	end
+end
+
+local function RemoveNoFallHook()
+	if not NoFallHook.Installed then return end
+	NoFallHook.Installed = false
+	RebuildNamecallHooks()
+end
+
+local function GetLive()
+	local ok, folder = pcall(function()
+		return workspace:FindFirstChild("Live") or workspace:WaitForChild("Live", 3)
+	end)
+	if ok and folder then return folder end
+	return nil
+end
+
+local function GetRoot(char)
+	return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+end
+
+local function safeNumberValue(v)
+	if not v then return nil end
+	local minV = (pcall(function() return v.MinValue end) and v.MinValue) or 0
+	local maxV = (pcall(function() return v.MaxValue end) and v.MaxValue) or 100
+	if type(minV) ~= "number" then minV = 0 end
+	if type(maxV) ~= "number" then maxV = 100 end
+	local ok, cur = pcall(function() return v.Value end)
+	if not ok or type(cur) ~= "number" then cur = 0 end
+	return cur, minV, maxV
+end
+
+local function safeRatio(v)
+	local cur, minV, maxV = safeNumberValue(v)
+	if cur == nil then return 1 end
+	local range = maxV - minV
+	if range <= 0 then return 1 end
+	return math.clamp((cur - minV) / range, 0, 1)
+end
+
+local function findValueInCharOrLive(char, lc, name)
+	if char then
+		local v = char:FindFirstChild(name)
+		if v then return v end
+	end
+	if lc then
+		local v = lc:FindFirstChild(name)
+		if v then return v end
+	end
+	return nil
+end
+
+local function getGuild(player)
+	if not player then return "No Guild" end
+	if EspData.GuildCache[player] then return EspData.GuildCache[player] end
+	local g = player:GetAttribute("Guild")
+	local r = (typeof(g) == "string" and g ~= "") and g or "No Guild"
+	EspData.GuildCache[player] = r
+	return r
+end
+
+local function makeSegBar(parent, barColor)
+	local bc = Instance.new("Frame")
+	bc.Size = UDim2.new(1, 0, 1, 0)
+	bc.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	bc.BorderSizePixel = 0
+	bc.ClipsDescendants = false
+	bc.Parent = parent
+	local sk = Instance.new("UIStroke")
+	sk.Color = Color3.fromRGB(0, 0, 0)
+	sk.Thickness = 1.5
+	sk.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	sk.Parent = bc
+	local segs = {}
+	local gap = 0.01
+	local segH = (1 - gap * 4) / 5
+	for i = 1, 5 do
+		local yPos = 1 - (i * segH) - ((i - 1) * gap)
+		local sb = Instance.new("Frame")
+		sb.Size = UDim2.new(1, 0, segH, 0)
+		sb.Position = UDim2.new(0, 0, yPos, 0)
+		sb.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		sb.BorderSizePixel = 0
+		sb.ClipsDescendants = true
+		sb.Parent = bc
+		local fi = Instance.new("Frame")
+		fi.Size = UDim2.new(1, 0, 1, 0)
+		fi.BackgroundColor3 = barColor
+		fi.BorderSizePixel = 0
+		fi.Parent = sb
+		segs[i] = {bg = sb, fill = fi}
+	end
+	return segs
+end
+
+local function makeSegBarH(parent, barColor)
+	local bc = Instance.new("Frame")
+	bc.Size = UDim2.new(1, 0, 1, 0)
+	bc.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	bc.BorderSizePixel = 0
+	bc.ClipsDescendants = false
+	bc.Parent = parent
+	local sk = Instance.new("UIStroke")
+	sk.Color = Color3.fromRGB(0, 0, 0)
+	sk.Thickness = 1.5
+	sk.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	sk.Parent = bc
+	local segs = {}
+	local gap = 0.01
+	local segW = (1 - gap * 4) / 5
+	for i = 1, 5 do
+		local xPos = (i - 1) * segW + (i - 1) * gap
+		local sb = Instance.new("Frame")
+		sb.Size = UDim2.new(segW, 0, 1, 0)
+		sb.Position = UDim2.new(xPos, 0, 0, 0)
+		sb.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		sb.BorderSizePixel = 0
+		sb.ClipsDescendants = true
+		sb.Parent = bc
+		local fi = Instance.new("Frame")
+		fi.Size = UDim2.new(1, 0, 1, 0)
+		fi.BackgroundColor3 = barColor
+		fi.BorderSizePixel = 0
+		fi.Parent = sb
+		segs[i] = {bg = sb, fill = fi}
+	end
+	return segs
+end
+
+local function updateSegs(segs, ratio, color)
+	if not segs then return end
+	for i = 1, 5 do
+		local seg = segs[i]
+		if seg and seg.fill then
+			local fr = math.clamp((ratio - (i - 1) / 5) / 0.2, 0, 1)
+			seg.fill.BackgroundColor3 = color
+			TweenService:Create(seg.fill, segTI, {
+				Size = UDim2.new(1, 0, fr, 0),
+				Position = UDim2.new(0, 0, 1 - fr, 0)
+			}):Play()
+		end
+	end
+end
+
+local function updateSegsH(segs, ratio, color)
+	if not segs then return end
+	for i = 1, 5 do
+		local seg = segs[i]
+		if seg and seg.fill then
+			local fr = math.clamp((ratio - (i - 1) / 5) / 0.2, 0, 1)
+			seg.fill.BackgroundColor3 = color
+			TweenService:Create(seg.fill, segTI, {
+				Size = UDim2.new(fr, 0, 1, 0),
+				Position = UDim2.new(0, 0, 0, 0)
+			}):Play()
+		end
+	end
+end
+
+local function mkBB(name, adornee, offset)
+	local bg = Instance.new("BillboardGui")
+	bg.Name = name
+	bg.Adornee = adornee
+	bg.StudsOffset = offset or Vector3.new(0, 0, 0)
+	bg.AlwaysOnTop = true
+	bg.ResetOnSpawn = false
+	bg.Parent = adornee
+	return bg
+end
+
+local function szP(bg, lbl)
+	bg.Size = UDim2.new(0, 200, 0, 120)
+	lbl.TextSize = math.clamp(math.floor(13 * EspData.Size + 0.5), 9, 26)
+end
+
+local function szBox(bg)
+	bg.Size = UDim2.new(4, 0, 6, 0)
+end
+
+local function szBar(bg)
+	if bg then bg.Size = UDim2.new(0.2, 0, 6, 0) end
+end
+
+local function szPosture(bg)
+	if bg then bg.Size = UDim2.new(4, 0, 0.25, 0); bg.StudsOffset = Vector3.new(0, 4.25, 0) end
+end
+
+local function szBlood(bg)
+	if bg then bg.Size = UDim2.new(4, 0, 0.25, 0); bg.StudsOffset = Vector3.new(0, 4.75, 0) end
+end
+
+local function szArmor(bg)
+	if bg then bg.Size = UDim2.new(4, 0, 0.25, 0); bg.StudsOffset = Vector3.new(0, 5.25, 0) end
+end
+
+local function szSanity(bg)
+	if bg then bg.Size = UDim2.new(4, 0, 0.25, 0); bg.StudsOffset = Vector3.new(0, 5.75, 0) end
+end
+
+local function setAllEnabled(pd, en)
+	if not pd then return end
+	for _, k in ipairs({
+		"billboard", "boxBillboard", "barBillboard", "stomachBillboard",
+		"waterBillboard", "etherBillboard", "postureBillboard",
+		"bloodBillboard", "armorBillboard", "sanityBillboard"
+	}) do
+		if pd[k] then
+			pcall(function() pd[k].Enabled = en end)
+		end
+	end
+end
+
+local function destroyKey(pd, key)
+	if pd and pd[key] then
+		pcall(function() pd[key]:Destroy() end)
+		pd[key] = nil
+	end
+end
+
+local function removePlayerESP(player)
+	local pd = EspData.PerPlayer[player]
+	if not pd then return end
+	if pd.charConn then pd.charConn:Disconnect() end
+	if pd.healthConn then pd.healthConn:Disconnect() end
+	for _, k in ipairs({
+		"billboard", "boxBillboard", "barBillboard", "stomachBillboard",
+		"waterBillboard", "etherBillboard", "postureBillboard",
+		"bloodBillboard", "armorBillboard", "sanityBillboard"
+	}) do
+		destroyKey(pd, k)
+	end
+	EspData.PerPlayer[player] = nil
+end
+
+local function ClearESP()
+	for player in pairs(EspData.PerPlayer) do
+		removePlayerESP(player)
+	end
+	EspData.PerPlayer = {}
+end
+
+local function recalcBarPositions(player)
+	local pd = EspData.PerPlayer[player]
+	if not pd then return end
+	local ri, li = 0, 0
+	local slots = {
+		{bb = pd.barBillboard, en = EspData.Enabled and EspData.ShowHealthBar, side = "right"},
+		{bb = pd.stomachBillboard, en = EspData.Enabled and EspData.ShowStomachBar, side = "left"},
+		{bb = pd.waterBillboard, en = EspData.Enabled and EspData.ShowWaterBar, side = "left"},
+		{bb = pd.etherBillboard, en = EspData.Enabled and EspData.ShowEtherBar, side = "right"},
+	}
+	for _, sl in ipairs(slots) do
+		if sl.en and sl.bb then
+			if sl.side == "right" then
+				ri = ri + 1
+				sl.bb.StudsOffset = Vector3.new(2.3 + (ri - 1) * (BAR_W + BAR_GAP), 0, 0)
+			else
+				li = li + 1
+				sl.bb.StudsOffset = Vector3.new(-(2.3 + (li - 1) * (BAR_W + BAR_GAP)), 0, 0)
+			end
+		end
+	end
+end
+
+local function createPlayerBillboard(player, char)
+	if player == LP or not char or not char.Parent then return end
+	local head = char:FindFirstChild("Head")
+	local root = head or char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local pd = EspData.PerPlayer[player]
+	if pd and pd.billboard then
+		if pd.billboard.Parent == root then return end
+		pcall(function() pd.billboard:Destroy() end)
+		pd.billboard = nil
+		pd.label = nil
+		pd.lastLabelText = nil
+	end
+	local yOff = head and 2.5 or 3.5
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "PlayerESP"
+	bg.Adornee = root
+	bg.StudsOffsetWorldSpace = Vector3.new(0, yOff, 0)
+	bg.AlwaysOnTop = true
+	bg.ResetOnSpawn = false
+	bg.LightInfluence = 0
+	bg.Parent = root
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.AnchorPoint = Vector2.new(0.5, 1)
+	lbl.Position = UDim2.new(0.5, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.TextColor3 = EspData.Color
+	lbl.TextStrokeTransparency = 0
+	lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	lbl.Font = Enum.Font.Ubuntu
+	lbl.TextScaled = false
+	lbl.TextWrapped = false
+	lbl.Text = ""
+	lbl.Parent = bg
+	szP(bg, lbl)
+	pd = pd or {}
+	pd.billboard = bg
+	pd.label = lbl
+	pd.lastLabelText = nil
+	EspData.PerPlayer[player] = pd
+end
+
+local function createPlayerBoxBillboard(player, char)
+	if player == LP then return end
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local pd = EspData.PerPlayer[player]
+	if pd and pd.boxBillboard then
+		if pd.boxBillboard.Parent == root then return end
+		pcall(function() pd.boxBillboard:Destroy() end)
+		pd.boxBillboard = nil
+	end
+	local bg = mkBB("PlayerBoxESP", root, Vector3.new(0, 0, 0))
+	bg.ClipsDescendants = false
+	local bf = Instance.new("Frame")
+	bf.Size = UDim2.new(1, 0, 1, 0)
+	bf.BackgroundTransparency = 1
+	bf.BorderSizePixel = 0
+	bf.Parent = bg
+	local function mkLine(sz, pos)
+		local f = Instance.new("Frame")
+		f.Size = sz
+		f.Position = pos
+		f.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		f.BorderSizePixel = 0
+		f.Parent = bf
+	end
+	mkLine(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 0, 0))
+	mkLine(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1))
+	mkLine(UDim2.new(0, 1, 1, 0), UDim2.new(0, 0, 0, 0))
+	mkLine(UDim2.new(0, 1, 1, 0), UDim2.new(1, -1, 0, 0))
+	szBox(bg)
+	pd = EspData.PerPlayer[player] or {}
+	pd.boxBillboard = bg
+	EspData.PerPlayer[player] = pd
+end
+
+local function createSegBarBillboard(player, char, fieldName, billName, color, segsKey)
+	if player == LP then return end
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local pd = EspData.PerPlayer[player]
+	if pd and pd[billName] then
+		if pd[billName].Parent == root then return end
+		pcall(function() pd[billName]:Destroy() end)
+		pd[billName] = nil
+	end
+	local bg = mkBB(fieldName, root)
+	bg.ClipsDescendants = false
+	local mf = Instance.new("Frame")
+	mf.Size = UDim2.new(1, 0, 1, 0)
+	mf.BackgroundTransparency = 1
+	mf.BorderSizePixel = 0
+	mf.Parent = bg
+	local segs = makeSegBar(mf, color)
+	szBar(bg)
+	pd = EspData.PerPlayer[player] or {}
+	pd[billName] = bg
+	pd[segsKey] = segs
+	EspData.PerPlayer[player] = pd
+	recalcBarPositions(player)
+end
+
+local function createPlayerBarBillboard(player, char)
+	createSegBarBillboard(player, char, "PlayerBarESP", "barBillboard", Color3.fromRGB(0, 210, 0), "boxSegments")
+end
+
+local function createPlayerStomachBillboard(player, char)
+	createSegBarBillboard(player, char, "PlayerStomachESP", "stomachBillboard", Color3.fromRGB(210, 180, 50), "stomachSegs")
+end
+
+local function createPlayerWaterBillboard(player, char)
+	createSegBarBillboard(player, char, "PlayerWaterESP", "waterBillboard", Color3.fromRGB(50, 150, 255), "waterSegs")
+end
+
+local function createPlayerEtherBillboard(player, char)
+	createSegBarBillboard(player, char, "PlayerEtherESP", "etherBillboard", Color3.fromRGB(100, 220, 255), "etherSegs")
+end
+
+local function createHorizBar(player, char, billKey, segsKey, name, color, szFn)
+	if player == LP then return end
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local pd = EspData.PerPlayer[player]
+	if pd and pd[billKey] then
+		if pd[billKey].Parent == root then return end
+		pcall(function() pd[billKey]:Destroy() end)
+		pd[billKey] = nil
+		pd[segsKey] = nil
+	end
+	local bg = mkBB(name, root)
+	bg.ClipsDescendants = false
+	local mf = Instance.new("Frame")
+	mf.Size = UDim2.new(1, 0, 1, 0)
+	mf.BackgroundTransparency = 1
+	mf.BorderSizePixel = 0
+	mf.Parent = bg
+	local segs = makeSegBarH(mf, color)
+	szFn(bg)
+	pd = EspData.PerPlayer[player] or {}
+	pd[billKey] = bg
+	pd[segsKey] = segs
+	EspData.PerPlayer[player] = pd
+end
+
+local function createPlayerPostureBillboard(player, char)
+	createHorizBar(player, char, "postureBillboard", "postureSegs", "PlayerPostureESP", Color3.fromRGB(255, 210, 0), szPosture)
+end
+
+local function createPlayerBloodBillboard(player, char)
+	createHorizBar(player, char, "bloodBillboard", "bloodSegs", "PlayerBloodESP", Color3.fromRGB(180, 0, 0), szBlood)
+end
+
+local function createPlayerArmorBillboard(player, char)
+	createHorizBar(player, char, "armorBillboard", "armorSegs", "PlayerArmorESP", Color3.fromRGB(190, 200, 210), szArmor)
+end
+
+local function createPlayerSanityBillboard(player, char)
+	createHorizBar(player, char, "sanityBillboard", "sanitySegs", "PlayerSanityESP", Color3.fromRGB(120, 0, 200), szSanity)
+end
+
+local function waitCharReady(char)
+	local tries = 0
+	while tries < 50 do
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		local head = char:FindFirstChild("Head")
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hrp and head and hum and hrp.Parent == char and head.Parent == char then
+			return true
+		end
+		tries = tries + 1
+		task.wait(0.1)
+	end
+	return false
+end
+
+local function applyAllESPToChar(player, char)
+	if not EspData.Enabled or player == LP then return end
+	if not char or not char.Parent then return end
+	createPlayerBillboard(player, char)
+	if EspData.ShowBox then createPlayerBoxBillboard(player, char) end
+	if EspData.ShowHealthBar then createPlayerBarBillboard(player, char) end
+	if EspData.ShowStomachBar then createPlayerStomachBillboard(player, char) end
+	if EspData.ShowWaterBar then createPlayerWaterBillboard(player, char) end
+	if EspData.ShowEtherBar then createPlayerEtherBillboard(player, char) end
+	if EspData.ShowPostureBar then createPlayerPostureBillboard(player, char) end
+	if EspData.ShowBloodBar then createPlayerBloodBillboard(player, char) end
+	if EspData.ShowArmorBar then createPlayerArmorBillboard(player, char) end
+	if EspData.ShowSanityBar then createPlayerSanityBillboard(player, char) end
+	recalcBarPositions(player)
+end
+
+local function setupPlayerESP(player)
+	if player == LP then return end
+	EspData.PerPlayer[player] = EspData.PerPlayer[player] or {}
+	local pd = EspData.PerPlayer[player]
+	if pd.charConn then
+		pd.charConn:Disconnect()
+		pd.charConn = nil
+	end
+	pd.charConn = player.CharacterAdded:Connect(function(char)
+		task.spawn(function()
+			if not Alive or not EspData.Enabled then return end
+			if not waitCharReady(char) then return end
+			if not Alive or not EspData.Enabled then return end
+			if player.Character ~= char then return end
+			applyAllESPToChar(player, char)
+		end)
+	end)
+	if player.Character then
+		local char = player.Character
+		task.spawn(function()
+			if not Alive or not EspData.Enabled then return end
+			if not waitCharReady(char) then return end
+			if not Alive or not EspData.Enabled then return end
+			if player.Character ~= char then return end
+			applyAllESPToChar(player, char)
+		end)
+	end
+	pcall(function()
+		player:GetAttributeChangedSignal("Guild"):Connect(function()
+			EspData.GuildCache[player] = nil
+		end)
+	end)
+end
+
+local function isValidLiveMob(model)
+	if not model or not model.Parent then return false end
+	if not model:IsA("Model") then return false end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then return false end
+	if model == LP.Character then return false end
+	if Players:GetPlayerFromCharacter(model) then return false end
+	if model:FindFirstChild("InteractPrompt") then return false end
+	local live = workspace:FindFirstChild("Live")
+	if not live or model.Parent ~= live then return false end
+	return true
+end
+
+local function getMobRoot(model)
+	return model:FindFirstChild("Head") or model:FindFirstChild("HumanoidRootPart")
+end
+
+local function removeMob(model)
+	local d = MobESP.PerMob[model]
+	if not d then return end
+	if d.billboard then pcall(function() d.billboard:Destroy() end) end
+	if d.highlight then pcall(function() d.highlight:Destroy() end) end
+	MobESP.PerMob[model] = nil
+end
+
+local function createMobBillboard(model)
+	if not isValidLiveMob(model) then return end
+	local root = getMobRoot(model)
+	if not root then return end
+	local d = MobESP.PerMob[model]
+	if d and d.billboard and d.billboard.Parent == root then return end
+	if d then removeMob(model) end
+
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "MobESP"
+	bg.Adornee = root
+	bg.StudsOffset = Vector3.new(0, 2.5, 0)
+	bg.AlwaysOnTop = true
+	bg.ResetOnSpawn = false
+	bg.Size = UDim2.new(0, 120, 0, 60)
+	bg.Parent = root
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1.5, 0, 1.5, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.TextColor3 = MobESP.Color
+	lbl.TextStrokeTransparency = 0
+	lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	lbl.Font = Enum.Font.Ubuntu
+	lbl.TextScaled = false
+	lbl.TextSize = 12
+	lbl.Text = ""
+	lbl.Parent = bg
+
+	local hl = nil
+	if MobESP.Highlight then
+		hl = Instance.new("Highlight")
+		hl.FillColor = MobESP.Color
+		hl.OutlineColor = MobESP.Color
+		hl.FillTransparency = 0.5
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.Occluded
+		hl.Adornee = model
+		hl.Parent = model
+	end
+
+	local cachedName = model.Name:gsub("^%.", ""):gsub("%d+$", "")
+	local cachedHum = model:FindFirstChildOfClass("Humanoid")
+
+	MobESP.PerMob[model] = {
+		billboard = bg,
+		label = lbl,
+		highlight = hl,
+		lastText = "",
+		lastVisible = nil,
+		cachedName = cachedName,
+		cachedHum = cachedHum,
+	}
+end
+
+local function tryAddMob(model)
+	if MobESP.PerMob[model] or not isValidLiveMob(model) then return end
+	local root = getMobRoot(model)
+	if root then
+		createMobBillboard(model)
+	else
+		task.spawn(function()
+			local w = model:WaitForChild("Head", 2) or model:WaitForChild("HumanoidRootPart", 2)
+			if not w or not isValidLiveMob(model) or MobESP.PerMob[model] then return end
+			createMobBillboard(model)
+		end)
+	end
+end
+
+local function ClearMobESP()
+	for model in pairs(MobESP.PerMob) do
+		removeMob(model)
+	end
+	MobESP.PerMob = {}
+end
+
+local function EnableMobESP()
+	if not Alive then return end
+	MobESP.Enabled = true
+
+	local live = GetLive()
+	if live then
+		for _, c in ipairs(live:GetChildren()) do
+			tryAddMob(c)
+		end
+	end
+
+	if MobESP.LiveAddedConn then MobESP.LiveAddedConn:Disconnect() end
+	if MobESP.LiveRemovedConn then MobESP.LiveRemovedConn:Disconnect() end
+
+	if live then
+		MobESP.LiveAddedConn = live.ChildAdded:Connect(function(c)
+			if MobESP.Enabled then
+				task.wait(0.15)
+				tryAddMob(c)
+			end
+		end)
+		MobESP.LiveRemovedConn = live.ChildRemoved:Connect(removeMob)
+	end
+
+	if MobConn then MobConn:Disconnect() end
+	MobConn = RunService.Heartbeat:Connect(function()
+		if not Alive or not MobESP.Enabled then return end
+		local now = tick()
+		if now - lastMobTick < MOB_RATE then return end
+		lastMobTick = now
+
+		local myChar = LP.Character
+		local myRoot = myChar and GetRoot(myChar)
+		if not myRoot then return end
+		local myPos = myRoot.Position
+		local cam = workspace.CurrentCamera
+
+		for model, d in pairs(MobESP.PerMob) do
+			if not isValidLiveMob(model) then
+				removeMob(model)
+			else
+				local root = getMobRoot(model)
+				local hum = d.cachedHum
+				if not hum or not hum.Parent then
+					hum = model:FindFirstChildOfClass("Humanoid")
+					d.cachedHum = hum
+				end
+
+				if root and hum and hum.Health > 0 then
+					local rPos = root.Position
+					local dist = (myPos - rPos).Magnitude
+					local visible = dist <= MobESP.Distance
+					if visible then
+						local _, onSc = cam:WorldToViewportPoint(rPos)
+						visible = onSc
+					end
+
+					if d.lastVisible ~= visible then
+						d.lastVisible = visible
+						if d.billboard then d.billboard.Enabled = visible end
+						if d.highlight then d.highlight.Enabled = visible end
+					end
+
+					if visible then
+						local nt = string.format("%s\n(%d studs)\n[%d/%d]",
+							d.cachedName,
+							math.floor(dist + 0.5),
+							math.floor(hum.Health + 0.5),
+							math.floor(hum.MaxHealth + 0.5)
+						)
+						if nt ~= d.lastText then
+							d.label.Text = nt
+							d.label.TextColor3 = MobESP.Color
+							d.lastText = nt
+						end
+					end
+				else
+					if d.lastVisible ~= false then
+						d.lastVisible = false
+						if d.billboard then d.billboard.Enabled = false end
+						if d.highlight then d.highlight.Enabled = false end
+					end
+				end
+			end
+		end
+	end)
+end
+
+local function DisableMobESP()
+	MobESP.Enabled = false
+	if MobConn then
+		MobConn:Disconnect()
+		MobConn = nil
+	end
+	if MobESP.LiveAddedConn then
+		MobESP.LiveAddedConn:Disconnect()
+		MobESP.LiveAddedConn = nil
+	end
+	if MobESP.LiveRemovedConn then
+		MobESP.LiveRemovedConn:Disconnect()
+		MobESP.LiveRemovedConn = nil
+	end
+	ClearMobESP()
+end
+
+local function ApplyMobESPColor()
+	for _, d in pairs(MobESP.PerMob) do
+		if d.label then d.label.TextColor3 = MobESP.Color end
+		if d.highlight then
+			d.highlight.FillColor = MobESP.Color
+			d.highlight.OutlineColor = MobESP.Color
+		end
+	end
+end
+
+local function ApplyMobHighlights()
+	if MobESP.Highlight then
+		for model, d in pairs(MobESP.PerMob) do
+			if not d.highlight and isValidLiveMob(model) then
+				local hl = Instance.new("Highlight")
+				hl.FillColor = MobESP.Color
+				hl.OutlineColor = MobESP.Color
+				hl.FillTransparency = 0.5
+				hl.OutlineTransparency = 0
+				hl.DepthMode = Enum.HighlightDepthMode.Occluded
+				hl.Adornee = model
+				hl.Parent = model
+				d.highlight = hl
+			end
+		end
+	else
+		for _, d in pairs(MobESP.PerMob) do
+			if d.highlight then
+				pcall(function() d.highlight:Destroy() end)
+				d.highlight = nil
+			end
+		end
+	end
+end
+
+local function DisconnectFogConns()
+	if Removals.FogStartConn then Removals.FogStartConn:Disconnect(); Removals.FogStartConn = nil end
+	if Removals.FogEndConn then Removals.FogEndConn:Disconnect(); Removals.FogEndConn = nil end
+	if Removals.AtmoDensityConn then Removals.AtmoDensityConn:Disconnect(); Removals.AtmoDensityConn = nil end
+end
+
+local function EnableNoFog()
+	if not Alive then return end
+	Removals.NoFog = true
+
+	if Removals.FogOriginals.FogStart == nil then
+		Removals.FogOriginals.FogStart = Lighting.FogStart
+		Removals.FogOriginals.FogEnd = Lighting.FogEnd
+		local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+		if atmo then
+			Removals.FogOriginals.Density = atmo.Density
+		end
+	end
+
+	Lighting.FogStart = 9e9
+	Lighting.FogEnd = 9e9
+	local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atmo then atmo.Density = 0 end
+
+	DisconnectFogConns()
+
+	Removals.FogStartConn = Lighting:GetPropertyChangedSignal("FogStart"):Connect(function()
+		if Removals.NoFog and Alive then Lighting.FogStart = 9e9 end
+	end)
+	Removals.FogEndConn = Lighting:GetPropertyChangedSignal("FogEnd"):Connect(function()
+		if Removals.NoFog and Alive then Lighting.FogEnd = 9e9 end
+	end)
+	local atmo2 = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atmo2 then
+		Removals.AtmoDensityConn = atmo2:GetPropertyChangedSignal("Density"):Connect(function()
+			if Removals.NoFog and Alive then atmo2.Density = 0 end
+		end)
+	end
+end
+
+local function DisableNoFog()
+	Removals.NoFog = false
+	DisconnectFogConns()
+
+	if Removals.FogOriginals.FogStart ~= nil then
+		pcall(function() Lighting.FogStart = Removals.FogOriginals.FogStart end)
+		pcall(function() Lighting.FogEnd = Removals.FogOriginals.FogEnd end)
+		local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+		if atmo and Removals.FogOriginals.Density ~= nil then
+			pcall(function() atmo.Density = Removals.FogOriginals.Density end)
+		end
+	end
+
+	Removals.FogOriginals.FogStart = nil
+	Removals.FogOriginals.FogEnd = nil
+	Removals.FogOriginals.Density = nil
+end
+
+local function EnableUnlockChat()
+	Removals.UnlockChat = true
+	pcall(function()
+		local cwc = TextChatService.ChatWindowConfiguration
+		if cwc then cwc.Enabled = true end
+	end)
+end
+
+local function DisableUnlockChat()
+	Removals.UnlockChat = false
+	pcall(function()
+		local cwc = TextChatService.ChatWindowConfiguration
+		if cwc then cwc.Enabled = false end
+	end)
+end
+
+local function CreateProximityGui()
+	local pg = LP:FindFirstChild("PlayerGui") or LP:WaitForChild("PlayerGui", 5)
+	if not pg then return end
+
+	local T = Library.GetTheme and Library:GetTheme() or {}
+	local bindTheme = Library.BindTheme
+
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "DayuiProximityESP"
+	sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Parent = pg
+
+	local frame = Instance.new("Frame")
+	frame.Name = "ProxFrame"
+	frame.Size = UDim2.new(0, 170, 0, 22)
+	frame.BackgroundColor3 = T.Window2 or Color3.fromRGB(0, 0, 0)
+	frame.BorderSizePixel = 0
+	frame.ClipsDescendants = true
+	frame.Parent = sg
+
+	local savedPos = Save:GetValue("prox_pos")
+	if type(savedPos) == "table" and type(savedPos.X) == "number" and type(savedPos.Y) == "number" then
+		frame.Position = UDim2.new(0, savedPos.X, 0, savedPos.Y)
+	else
+		local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+		frame.Position = UDim2.new(0, 20, 0, math.floor(vp.Y * 0.5))
+	end
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = T.Stroke or Color3.fromRGB(60, 60, 80)
+	stroke.Thickness = 1
+	stroke.Parent = frame
+
+	local header = Instance.new("Frame")
+	header.Name = "Header"
+	header.Size = UDim2.new(1, 0, 0, 22)
+	header.BackgroundColor3 = T.Window1 or Color3.fromRGB(15, 15, 15)
+	header.BorderSizePixel = 0
+	header.ClipsDescendants = true
+	header.Parent = frame
+
+	local title = Instance.new("TextLabel")
+	title.Position = UDim2.fromOffset(4, 0)
+	title.Size = UDim2.new(1, -8, 1, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Players"
+	title.TextColor3 = T.TextPrimary or Color3.fromRGB(255, 255, 255)
+	title.Font = Enum.Font.RobotoCondensed
+	title.TextSize = 13
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextYAlignment = Enum.TextYAlignment.Center
+	title.Parent = header
+
+	if bindTheme then
+		bindTheme(frame, { BackgroundColor3 = "Window2" })
+		bindTheme(stroke, { Color = "Stroke" })
+		bindTheme(header, { BackgroundColor3 = "Window1" })
+		bindTheme(title, { TextColor3 = "TextPrimary" })
+	end
+
+	local list = Instance.new("Frame")
+	list.Name = "List"
+	list.Size = UDim2.new(1, 0, 0, 0)
+	list.Position = UDim2.new(0, 0, 0, 22)
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.AutomaticSize = Enum.AutomaticSize.Y
+	list.Parent = frame
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 0)
+	layout.Parent = list
+
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		frame.Size = UDim2.new(0, 170, 0, 22 + layout.AbsoluteContentSize.Y)
+	end)
+
+	local dragging = false
+	local dragStart, startPos
+
+	ProximityESP.DragConn1 = header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frame.Position
+		end
+	end)
+
+	ProximityESP.DragConn2 = UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			local delta = input.Position - dragStart
+			local newX = startPos.X.Offset + delta.X
+			local newY = startPos.Y.Offset + delta.Y
+			frame.Position = UDim2.new(0, newX, 0, newY)
+			Save:SetValue("prox_pos", {X = newX, Y = newY})
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	ProximityESP.Gui = sg
+	ProximityESP.Frame = frame
+	ProximityESP.List = list
+end
+
+local function DestroyProximityGui()
+	if ProximityESP.DragConn1 then ProximityESP.DragConn1:Disconnect(); ProximityESP.DragConn1 = nil end
+	if ProximityESP.DragConn2 then ProximityESP.DragConn2:Disconnect(); ProximityESP.DragConn2 = nil end
+	if ProximityESP.Gui then
+		pcall(function() ProximityESP.Gui:Destroy() end)
+		ProximityESP.Gui = nil
+		ProximityESP.Frame = nil
+		ProximityESP.List = nil
+	end
+end
+
+local function UpdateProximityList(entries)
+	local list = ProximityESP.List
+	if not list then return end
+
+	local T = Library.GetTheme and Library:GetTheme() or {}
+	local bindTheme = Library.BindTheme
+	local rowColor = T.TextDim or Color3.fromRGB(140, 140, 145)
+
+	local existing = {}
+	for _, child in ipairs(list:GetChildren()) do
+		if child:IsA("Frame") then
+			existing[child.Name] = child
+		end
+	end
+
+	local seen = {}
+	for i, entry in ipairs(entries) do
+		seen[entry.name] = true
+		local row = existing[entry.name]
+		if not row then
+			row = Instance.new("Frame")
+			row.Name = entry.name
+			row.Size = UDim2.new(1, 0, 0, 18)
+			row.BackgroundTransparency = 1
+			row.BorderSizePixel = 0
+			row.LayoutOrder = i
+			row.Parent = list
+
+			local lbl = Instance.new("TextLabel")
+			lbl.Size = UDim2.new(1, -8, 1, 0)
+			lbl.Position = UDim2.new(0, 4, 0, 0)
+			lbl.BackgroundTransparency = 1
+			lbl.Font = Enum.Font.SourceSans
+			lbl.TextSize = 12
+			lbl.TextColor3 = rowColor
+			lbl.TextXAlignment = Enum.TextXAlignment.Left
+			lbl.TextYAlignment = Enum.TextYAlignment.Center
+			lbl.Parent = row
+
+			if bindTheme then bindTheme(lbl, { TextColor3 = "TextDim" }) end
+		end
+
+		local lbl = row:FindFirstChildOfClass("TextLabel")
+		if lbl then
+			lbl.Text = string.format("%s  %d studs", entry.name, math.floor(entry.dist + 0.5))
+		end
+		row.LayoutOrder = i
+	end
+
+	for name, row in pairs(existing) do
+		if not seen[name] then
+			row:Destroy()
+		end
+	end
+end
+
+local function EnableProximityESP()
+	if not Alive then return end
+	ProximityESP.Enabled = true
+	task.spawn(CreateProximityGui)
+
+	if ProximityConn then ProximityConn:Disconnect() end
+	ProximityConn = RunService.Heartbeat:Connect(function()
+		if not Alive or not ProximityESP.Enabled then return end
+		local now = tick()
+		if now - lastProxTick < PROX_RATE then return end
+		lastProxTick = now
+
+		local myChar = LP.Character
+		local myRoot = myChar and GetRoot(myChar)
+		if not myRoot then return end
+		local myPos = myRoot.Position
+
+		local entries = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LP then
+				local ch = p.Character
+				if ch then
+					local rt = ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("Head")
+					if rt then
+						local dist = (myPos - rt.Position).Magnitude
+						if dist <= ProximityESP.Distance then
+							entries[#entries + 1] = {name = p.Name, dist = dist}
+						end
+					end
+				end
+			end
+		end
+		table.sort(entries, function(a, b) return a.dist < b.dist end)
+		UpdateProximityList(entries)
+	end)
+end
+
+local function DisableProximityESP()
+	ProximityESP.Enabled = false
+	if ProximityConn then
+		ProximityConn:Disconnect()
+		ProximityConn = nil
+	end
+	DestroyProximityGui()
+end
+
+local CHEST_COLOR = Color3.fromRGB(255, 128, 192)
+
+local function getChestPart(obj)
+	if obj:IsA("Model") then
+		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+	elseif obj:IsA("BasePart") then
+		return obj
+	end
+end
+
+local function removeChest(obj)
+	local d = ChestESP.PerChest[obj]
+	if not d then return end
+	if d.billboard then pcall(function() d.billboard:Destroy() end) end
+	ChestESP.PerChest[obj] = nil
+end
+
+local function createChestBillboard(obj)
+	if ChestESP.Opened[obj] or ChestESP.PerChest[obj] then return end
+	local part = getChestPart(obj)
+	if not part then return end
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "ChestESP"
+	bg.Adornee = part
+	bg.StudsOffset = Vector3.new(0, 3, 0)
+	bg.AlwaysOnTop = true
+	bg.ResetOnSpawn = false
+	bg.Size = UDim2.new(0, 140, 0, 50)
+	bg.Parent = part
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "ChestLabel"
+	lbl.Size = UDim2.new(1.5, 0, 1.5, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.TextColor3 = CHEST_COLOR
+	lbl.TextStrokeTransparency = 0
+	lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	lbl.Font = Enum.Font.Ubuntu
+	lbl.TextScaled = false
+	lbl.TextSize = 12
+	lbl.Text = "Loot"
+	lbl.Parent = bg
+	ChestESP.PerChest[obj] = {billboard = bg, label = lbl, part = part, lastText = ""}
+end
+
+local function tryAddChest(obj)
+	if not obj or not obj:IsA("Model") or obj.Name ~= "Model" then return end
+	task.defer(function()
+		task.wait(0.1)
+		if obj and obj.Parent and not ChestESP.Opened[obj] then
+			createChestBillboard(obj)
+		end
+	end)
+end
+
+local function EnableChestESP()
+	if not Alive then return end
+	ChestESP.Enabled = true
+
+	local thrown = workspace:FindFirstChild("Thrown")
+	if not thrown then
+		task.spawn(function()
+			thrown = workspace:WaitForChild("Thrown", 10)
+			if not thrown or not ChestESP.Enabled then return end
+			for _, c in ipairs(thrown:GetChildren()) do
+				tryAddChest(c)
+			end
+			if ChestESP.AddedConn then ChestESP.AddedConn:Disconnect() end
+			if ChestESP.RemovedConn then ChestESP.RemovedConn:Disconnect() end
+			ChestESP.AddedConn = thrown.ChildAdded:Connect(function(c)
+				if ChestESP.Enabled then task.wait(0.15); tryAddChest(c) end
+			end)
+			ChestESP.RemovedConn = thrown.ChildRemoved:Connect(removeChest)
+		end)
+		return
+	end
+
+	for _, c in ipairs(thrown:GetChildren()) do
+		tryAddChest(c)
+	end
+
+	if ChestESP.AddedConn then ChestESP.AddedConn:Disconnect() end
+	if ChestESP.RemovedConn then ChestESP.RemovedConn:Disconnect() end
+
+	ChestESP.AddedConn = thrown.ChildAdded:Connect(function(c)
+		if ChestESP.Enabled then task.wait(0.15); tryAddChest(c) end
+	end)
+	ChestESP.RemovedConn = thrown.ChildRemoved:Connect(removeChest)
+
+	if ChestConn then ChestConn:Disconnect() end
+	ChestConn = RunService.Heartbeat:Connect(function()
+		if not Alive or not ChestESP.Enabled then return end
+		local now = tick()
+		if now - lastChestTick < CHEST_RATE then return end
+		lastChestTick = now
+
+		local myChar = LP.Character
+		local myRoot = myChar and GetRoot(myChar)
+		if not myRoot then return end
+		local myPos = myRoot.Position
+		local cam = workspace.CurrentCamera
+
+		for obj, d in pairs(ChestESP.PerChest) do
+			if not d.part or not d.part.Parent or not obj.Parent then
+				removeChest(obj)
+			else
+				local dist = (myPos - d.part.Position).Magnitude
+				if dist <= 25 then
+					ChestESP.Opened[obj] = true
+					removeChest(obj)
+				elseif dist > ChestESP.Distance then
+					if d.billboard.Enabled then d.billboard.Enabled = false end
+				else
+					local _, onSc = cam:WorldToViewportPoint(d.part.Position)
+					if d.billboard.Enabled ~= onSc then d.billboard.Enabled = onSc end
+					if onSc then
+						local nt = string.format("Loot\n(%d studs)", math.floor(dist + 0.5))
+						if nt ~= d.lastText then
+							d.label.Text = nt
+							d.lastText = nt
+						end
+					end
+				end
+			end
+		end
+	end)
+end
+
+local function DisableChestESP()
+	ChestESP.Enabled = false
+	if ChestConn then ChestConn:Disconnect(); ChestConn = nil end
+	if ChestESP.AddedConn then ChestESP.AddedConn:Disconnect(); ChestESP.AddedConn = nil end
+	if ChestESP.RemovedConn then ChestESP.RemovedConn:Disconnect(); ChestESP.RemovedConn = nil end
+	for obj in pairs(ChestESP.PerChest) do removeChest(obj) end
+	ChestESP.PerChest = {}
+	ChestESP.Opened = {}
+end
+
+local function UpdateESP()
+	if not Alive or not EspData.Enabled then return end
+	local now = tick()
+	if now - lastEspTick < ESP_RATE then return end
+	lastEspTick = now
+
+	local myChar = LP.Character
+	local myRoot = myChar and GetRoot(myChar)
+	if not myRoot then return end
+	local myPos = myRoot.Position
+	local cam = workspace.CurrentCamera
+	local distMax = EspData.Distance
+	local distMaxSq = distMax * distMax
+	local live = GetLive()
+
+	for player, pd in pairs(EspData.PerPlayer) do
+		if player ~= LP then
+			local char = player.Character
+			if not char then
+				setAllEnabled(pd, false)
+			else
+				local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				if not root or not hum then
+					setAllEnabled(pd, false)
+					if not pd._waitingForChar then
+						pd._waitingForChar = true
+						task.spawn(function()
+							if not waitCharReady(char) then pd._waitingForChar = nil; return end
+							if Alive and EspData.Enabled and player.Character == char then
+								applyAllESPToChar(player, char)
+							end
+							pd._waitingForChar = nil
+						end)
+					end
+				else
+					pd._waitingForChar = nil
+					local labelRoot = char:FindFirstChild("Head") or root
+					if EspData.Enabled then
+						if not pd.billboard or pd.billboard.Parent ~= labelRoot then
+							createPlayerBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowBox and (not pd.boxBillboard or pd.boxBillboard.Parent ~= root) then
+							createPlayerBoxBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowHealthBar and (not pd.barBillboard or pd.barBillboard.Parent ~= root) then
+							createPlayerBarBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowStomachBar and (not pd.stomachBillboard or pd.stomachBillboard.Parent ~= root) then
+							createPlayerStomachBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowWaterBar and (not pd.waterBillboard or pd.waterBillboard.Parent ~= root) then
+							createPlayerWaterBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowEtherBar and (not pd.etherBillboard or pd.etherBillboard.Parent ~= root) then
+							createPlayerEtherBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowPostureBar and (not pd.postureBillboard or pd.postureBillboard.Parent ~= root) then
+							createPlayerPostureBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowBloodBar and (not pd.bloodBillboard or pd.bloodBillboard.Parent ~= root) then
+							createPlayerBloodBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowArmorBar and (not pd.armorBillboard or pd.armorBillboard.Parent ~= root) then
+							createPlayerArmorBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+						if EspData.ShowSanityBar and (not pd.sanityBillboard or pd.sanityBillboard.Parent ~= root) then
+							createPlayerSanityBillboard(player, char)
+							pd = EspData.PerPlayer[player]
+						end
+					end
+
+					pd = EspData.PerPlayer[player]
+					if pd then
+						local rPos = root.Position
+						local dx = rPos.X - myPos.X
+						local dy = rPos.Y - myPos.Y
+						local dz = rPos.Z - myPos.Z
+						local distSq = dx * dx + dy * dy + dz * dz
+						local dist = math.sqrt(distSq)
+						local vis = false
+						if distSq <= distMaxSq and cam then
+							local _, onSc = cam:WorldToViewportPoint(rPos)
+							vis = onSc
+						end
+
+						local lc = live and live:FindFirstChild(player.Name)
+
+						if pd.billboard and pd.label then
+							if not vis then
+								if pd.billboard.Enabled then pd.billboard.Enabled = false end
+							else
+								if not pd.billboard.Enabled then pd.billboard.Enabled = true end
+								pd.label.TextColor3 = EspData.Color
+								local parts = {}
+								if EspData.ShowName then parts[#parts + 1] = player.Name end
+								if EspData.ShowLevel then
+									parts[#parts + 1] = "[Level " .. tostring(char:GetAttribute("Level") or player:GetAttribute("Level") or "?") .. "]"
+								end
+								if EspData.ShowGuild then parts[#parts + 1] = "Guild: " .. getGuild(player) end
+								if EspData.ShowDistance then parts[#parts + 1] = "(" .. math.floor(dist + 0.5) .. " studs)" end
+								if EspData.ShowHealth then
+									local hp = 0
+									local okH, hMax = pcall(function() return hum.MaxHealth end)
+									local okV, hVal = pcall(function() return hum.Health end)
+									if okH and okV and hMax and hMax > 0 then
+										hp = math.floor(math.clamp(hVal / hMax, 0, 1) * 100 + 0.5)
+									end
+									parts[#parts + 1] = "[" .. hp .. "%]"
+								end
+								local nt = table.concat(parts, "\n")
+								if nt ~= pd.lastLabelText then
+									pd.label.Text = nt
+									pd.lastLabelText = nt
+								end
+							end
+						end
+
+						if pd.boxBillboard then
+							local should = EspData.ShowBox and vis
+							if pd.boxBillboard.Enabled ~= should then pd.boxBillboard.Enabled = should end
+						end
+
+						if pd.barBillboard and pd.boxSegments then
+							if not EspData.ShowHealthBar or not vis then
+								if pd.barBillboard.Enabled then pd.barBillboard.Enabled = false end
+							else
+								if not pd.barBillboard.Enabled then pd.barBillboard.Enabled = true end
+								local okH, hMax = pcall(function() return hum.MaxHealth end)
+								local okV, hVal = pcall(function() return hum.Health end)
+								if okH and okV and hMax and hMax > 0 then
+									local hr = math.clamp(hVal / hMax, 0, 1)
+									if math.abs(hr - (pd.lastHpRatio or -1)) > 0.005 then
+										pd.lastHpRatio = hr
+										updateSegs(pd.boxSegments, hr, Color3.new(
+											math.clamp(2 * (1 - hr), 0, 1),
+											math.clamp(2 * hr, 0, 1),
+											0
+										))
+									end
+								end
+							end
+						end
+
+						local function updateRes(billKey, segsKey, lastKey, valName, enabled, fillC, lowC)
+							local bill = pd[billKey]
+							local segs = pd[segsKey]
+							if not bill or not segs then return end
+							if not enabled or not vis then
+								if bill.Enabled then bill.Enabled = false end
+								return
+							end
+							if not bill.Enabled then bill.Enabled = true end
+							local ratio = 1
+							local v = findValueInCharOrLive(char, lc, valName)
+							if v then ratio = safeRatio(v) end
+							if math.abs(ratio - (pd[lastKey] or -1)) > 0.005 then
+								pd[lastKey] = ratio
+								updateSegs(segs, ratio, Color3.new(
+									lowC.R + (fillC.R - lowC.R) * ratio,
+									lowC.G + (fillC.G - lowC.G) * ratio,
+									lowC.B + (fillC.B - lowC.B) * ratio
+								))
+							end
+						end
+
+						updateRes("stomachBillboard", "stomachSegs", "lastStomachRatio", "Stomach", EspData.ShowStomachBar,
+							Color3.fromRGB(210, 180, 50), Color3.fromRGB(180, 80, 20))
+						updateRes("waterBillboard", "waterSegs", "lastWaterRatio", "Water", EspData.ShowWaterBar,
+							Color3.fromRGB(50, 150, 255), Color3.fromRGB(20, 80, 200))
+						updateRes("etherBillboard", "etherSegs", "lastEtherRatio", "Ether", EspData.ShowEtherBar,
+							Color3.fromRGB(100, 220, 255), Color3.fromRGB(50, 180, 230))
+
+						local function updateHoriz(billKey, segsKey, lastKey, valName, enabled, fillC, lowC)
+							local bill = pd[billKey]
+							local segs = pd[segsKey]
+							if not bill or not segs then return end
+							if not enabled or not vis then
+								if bill.Enabled then bill.Enabled = false end
+								return
+							end
+							if not bill.Enabled then bill.Enabled = true end
+							local ratio = 0
+							local v = findValueInCharOrLive(char, lc, valName)
+							if v then ratio = safeRatio(v) end
+							if math.abs(ratio - (pd[lastKey] or -1)) > 0.005 then
+								pd[lastKey] = ratio
+								updateSegsH(segs, ratio, Color3.new(
+									lowC.R + (fillC.R - lowC.R) * ratio,
+									lowC.G + (fillC.G - lowC.G) * ratio,
+									lowC.B + (fillC.B - lowC.B) * ratio
+								))
+							end
+						end
+
+						updateHoriz("postureBillboard", "postureSegs", "lastPostureRatio", "BreakMeter", EspData.ShowPostureBar,
+							Color3.fromRGB(255, 210, 0), Color3.fromRGB(190, 120, 20))
+						updateHoriz("bloodBillboard", "bloodSegs", "lastBloodRatio", "Blood", EspData.ShowBloodBar,
+							Color3.fromRGB(240, 80, 80), Color3.fromRGB(120, 10, 10))
+						updateHoriz("armorBillboard", "armorSegs", "lastArmorRatio", "Armor", EspData.ShowArmorBar,
+							Color3.fromRGB(220, 228, 236), Color3.fromRGB(120, 130, 140))
+						updateHoriz("sanityBillboard", "sanitySegs", "lastSanityRatio", "Sanity", EspData.ShowSanityBar,
+							Color3.fromRGB(170, 90, 230), Color3.fromRGB(90, 40, 140))
+					end
+				end
+			end
+		end
+	end
+end
+
+local function EnableESP()
+	if not Alive then return end
+	EspData.Enabled = true
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LP then setupPlayerESP(p) end
+	end
+	if PlayerAddedConn then PlayerAddedConn:Disconnect() end
+	PlayerAddedConn = Players.PlayerAdded:Connect(function(p)
+		if Alive and EspData.Enabled then setupPlayerESP(p) end
+	end)
+	if PlayerRemovingConn then PlayerRemovingConn:Disconnect() end
+	PlayerRemovingConn = Players.PlayerRemoving:Connect(function(p)
+		removePlayerESP(p)
+		EspData.GuildCache[p] = nil
+	end)
+	if EspConn then EspConn:Disconnect() end
+	EspConn = RunService.Heartbeat:Connect(UpdateESP)
+end
+
+local function DisableESP()
+	EspData.Enabled = false
+	if EspConn then EspConn:Disconnect(); EspConn = nil end
+	if PlayerAddedConn then PlayerAddedConn:Disconnect(); PlayerAddedConn = nil end
+	if PlayerRemovingConn then PlayerRemovingConn:Disconnect(); PlayerRemovingConn = nil end
+	ClearESP()
+end
+
+local function RefreshESPBars()
+	if not EspData.Enabled then return end
+	for player, pd in pairs(EspData.PerPlayer) do
+		local char = player.Character
+		if char then
+			if not EspData.ShowBox then destroyKey(pd, "boxBillboard") end
+			if not EspData.ShowHealthBar then destroyKey(pd, "barBillboard"); pd.boxSegments = nil end
+			if not EspData.ShowStomachBar then destroyKey(pd, "stomachBillboard"); pd.stomachSegs = nil end
+			if not EspData.ShowWaterBar then destroyKey(pd, "waterBillboard"); pd.waterSegs = nil end
+			if not EspData.ShowEtherBar then destroyKey(pd, "etherBillboard"); pd.etherSegs = nil end
+			if not EspData.ShowPostureBar then destroyKey(pd, "postureBillboard"); pd.postureSegs = nil end
+			if not EspData.ShowBloodBar then destroyKey(pd, "bloodBillboard"); pd.bloodSegs = nil end
+			if not EspData.ShowArmorBar then destroyKey(pd, "armorBillboard"); pd.armorSegs = nil end
+			if not EspData.ShowSanityBar then destroyKey(pd, "sanityBillboard"); pd.sanitySegs = nil end
+			applyAllESPToChar(player, char)
+		end
+	end
+end
+
+local function DisableFly()
+	Move.Fly = false
+	if Move.FlyRefresh then pcall(function() task.cancel(Move.FlyRefresh) end); Move.FlyRefresh = nil end
+	if Move.FlyConn then Move.FlyConn:Disconnect(); Move.FlyConn = nil end
+	if Move.BV then pcall(function() Move.BV:Destroy() end); Move.BV = nil end
+	local char = LP.Character
+	if char then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then hum.PlatformStand = false end
+	end
+end
+
+local function CreateFlyBV()
+	local char = LP.Character
+	if not char then return nil end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+	if Move.BV then pcall(function() Move.BV:Destroy() end); Move.BV = nil end
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "DayuiFlyBV"
+	bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+	bv.Velocity = Vector3.zero
+	bv.Parent = root
+	pcall(function() CollectionService:AddTag(bv, "AllowedBM") end)
+	Move.BV = bv
+	return bv
+end
+
+local function EnableFly()
+	if not Alive then return end
+	DisableFly()
+	Move.Fly = true
+	local char = LP.Character
+	if not char then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not root or not hum then return end
+
+	hum.PlatformStand = true
+	CreateFlyBV()
+
+	Move.FlyConn = RunService.RenderStepped:Connect(function()
+		if not Alive or not Move.Fly then return end
+		if not Move.BV or not Move.BV.Parent then
+			CreateFlyBV()
+			if not Move.BV then return end
+		end
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local dir = Vector3.zero
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then
+			dir = dir - Vector3.new(0, 1, 0)
+		end
+		if dir.Magnitude > 0 then
+			Move.BV.Velocity = dir.Unit * Move.FlySpeed
+		else
+			Move.BV.Velocity = Vector3.zero
+		end
+	end)
+
+	Move.FlyRefresh = task.spawn(function()
+		while Alive and Move.Fly do
+			task.wait(3)
+			if not Alive or not Move.Fly then break end
+			CreateFlyBV()
+		end
+	end)
+end
+
+local function RestoreWorldParts()
+	for part, can in pairs(Move.WorldOrig) do
+		pcall(function()
+			if part and part.Parent then part.CanCollide = can end
+		end)
+	end
+	Move.WorldOrig = {}
+end
+
+local function RestoreNoclip()
+	if Move.NoclipConn then Move.NoclipConn:Disconnect(); Move.NoclipConn = nil end
+	for part, can in pairs(Move.NoclipOrig) do
+		pcall(function()
+			if part and part.Parent then part.CanCollide = can end
+		end)
+	end
+	Move.NoclipOrig = {}
+	RestoreWorldParts()
+end
+
+local function ApplyNoclip()
+	local char = LP.Character
+	if not char then return end
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if Move.NoclipOrig[part] == nil then Move.NoclipOrig[part] = part.CanCollide end
+			part.CanCollide = false
+		end
+	end
+end
+
+local function UpdateWorldNoclip()
+	if not Move.Noclip or not Move.FullNoclip then
+		RestoreWorldParts()
+		return
+	end
+	local char = LP.Character
+	if not char then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {char}
+
+	local nearby = workspace:GetPartBoundsInRadius(root.Position, 250, params)
+	local seen = {}
+
+	for _, part in ipairs(nearby) do
+		if part:IsA("BasePart") then
+			seen[part] = true
+			if Move.WorldOrig[part] == nil then Move.WorldOrig[part] = part.CanCollide end
+			part.CanCollide = false
+		end
+	end
+
+	for part, can in pairs(Move.WorldOrig) do
+		if not seen[part] then
+			pcall(function()
+				if part and part.Parent then part.CanCollide = can end
+			end)
+			Move.WorldOrig[part] = nil
+		end
+	end
+end
+
+local function EnableNoclip()
+	if not Alive then return end
+	Move.Noclip = true
+	InstallRaycastHook()
+	ApplyNoclip()
+	if Move.NoclipConn then Move.NoclipConn:Disconnect(); Move.NoclipConn = nil end
+	Move.NoclipConn = RunService.Stepped:Connect(function()
+		if not Alive or not Move.Noclip then return end
+		local char = LP.Character
+		if not char then return end
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then
+				if Move.NoclipOrig[part] == nil then Move.NoclipOrig[part] = part.CanCollide end
+				part.CanCollide = false
+			end
+		end
+		if Move.FullNoclip then UpdateWorldNoclip() else RestoreWorldParts() end
+	end)
+end
+
+local function DisableNoclip()
+	Move.Noclip = false
+	RemoveRaycastHook()
+	RestoreNoclip()
+end
+
+local function EnableNoFallDamage()
+	if not Alive then return end
+	Removals.NoFall = true
+	if NoFallHook.Installed then return end
+	InstallNoFallHook()
+	if not NoFallHook.Installed then Removals.NoFall = false end
+end
+
+local function DisableNoFallDamage()
+	Removals.NoFall = false
+	RemoveNoFallHook()
+end
+
+local function FullCleanup()
+	Alive = false
+	Move.Noclip = false
+	Move.Fly = false
+	Removals.NoFall = false
+	Removals.UnlockChat = false
+	pcall(RemoveRaycastHook)
+
+	if InputConn then InputConn:Disconnect(); InputConn = nil end
+	if Move.NoclipConn then Move.NoclipConn:Disconnect(); Move.NoclipConn = nil end
+	if Move.FlyConn then Move.FlyConn:Disconnect(); Move.FlyConn = nil end
+	if EspConn then EspConn:Disconnect(); EspConn = nil end
+	if Move.CharConn then Move.CharConn:Disconnect(); Move.CharConn = nil end
+	if PlayerAddedConn then PlayerAddedConn:Disconnect(); PlayerAddedConn = nil end
+	if PlayerRemovingConn then PlayerRemovingConn:Disconnect(); PlayerRemovingConn = nil end
+
+	pcall(DisableFly)
+	pcall(DisableNoclip)
+	pcall(DisableNoFallDamage)
+	pcall(DisableNoFog)
+	pcall(DisableMobESP)
+	pcall(DisableESP)
+	pcall(DisableChestESP)
+	pcall(DisableProximityESP)
+	pcall(StopVoidMob)
+	pcall(StopAllTeleportLoops)
+	pcall(function()
+		local cwc = TextChatService.ChatWindowConfiguration
+		if cwc then cwc.Enabled = false end
+	end)
+
+	EspData.Enabled = false
+	ClearESP()
+
+	pcall(function() task.cancel(clientLoop) end)
+end
+
+Move.CharConn = LP.CharacterAdded:Connect(function()
+	if not Alive then return end
+	task.wait(0.3)
+	if not Alive then return end
+	if Move.Fly then EnableFly() end
+	if Move.Noclip then ApplyNoclip() end
+end)
+
+local saved = {
+	Enable = Save:GetValue("esp_enable", false),
+	Name = Save:GetValue("esp_name", true),
+	Level = Save:GetValue("esp_level", true),
+	Guild = Save:GetValue("esp_guild", true),
+	Distance = Save:GetValue("esp_distance", true),
+	Health = Save:GetValue("esp_health", true),
+	Box = Save:GetValue("esp_box", true),
+	HealthBar = Save:GetValue("esp_healthbar", true),
+	StomachBar = Save:GetValue("esp_stomachbar", true),
+	WaterBar = Save:GetValue("esp_waterbar", true),
+	EtherBar = Save:GetValue("esp_etherbar", true),
+	PostureBar = Save:GetValue("esp_posturebar", true),
+	BloodBar = Save:GetValue("esp_bloodbar", true),
+	ArmorBar = Save:GetValue("esp_armorbar", true),
+	SanityBar = Save:GetValue("esp_sanitybar", true),
+	Fly = Save:GetValue("fly_enable", false),
+	Noclip = Save:GetValue("noclip_enable", false),
+	FullNoclip = Save:GetValue("fullnoclip_enable", false),
+	NoFall = Save:GetValue("nofall_enable", false),
+	NoFog = Save:GetValue("nofog_enable", false),
+	UnlockChat = Save:GetValue("unlockchat_enable", false),
+	MobESP = Save:GetValue("mob_esp_enable", false),
+	MobDistance = Save:GetValue("mob_esp_distance", 2500),
+	MobHighlight = Save:GetValue("mob_esp_highlight", true),
+	ChestESP = Save:GetValue("chest_esp_enable", false),
+	ChestDistance = Save:GetValue("chest_esp_distance", 5000),
+	ProximityESP = Save:GetValue("proximity_enable", false),
+	ProximityDistance = Save:GetValue("proximity_distance", 50),
+}
+
+local function GetSavedColor()
+	local c = Save:GetValue("esp_color")
+	if type(c) == "table" then return Color3.new(c.R, c.G, c.B) end
+	return Color3.fromRGB(255, 255, 255)
+end
+
+local function GetSavedMobColor()
+	local c = Save:GetValue("mob_esp_color")
+	if type(c) == "table" then return Color3.new(c.R, c.G, c.B) end
+	return Color3.fromRGB(0, 255, 0)
+end
+
+EspData.Color = GetSavedColor()
+EspData.ShowName = saved.Name
+EspData.ShowLevel = saved.Level
+EspData.ShowGuild = saved.Guild
+EspData.ShowDistance = saved.Distance
+EspData.ShowHealth = saved.Health
+EspData.ShowBox = saved.Box
+EspData.ShowHealthBar = saved.HealthBar
+EspData.ShowStomachBar = saved.StomachBar
+EspData.ShowWaterBar = saved.WaterBar
+EspData.ShowEtherBar = saved.EtherBar
+EspData.ShowPostureBar = saved.PostureBar
+EspData.ShowBloodBar = saved.BloodBar
+EspData.ShowArmorBar = saved.ArmorBar
+EspData.ShowSanityBar = saved.SanityBar
+EspData.Distance = Save:GetValue("esp_maxdist", 5000)
+EspData.Size = Save:GetValue("esp_size", 1)
+Move.FullNoclip = saved.FullNoclip
+ChestESP.Distance = saved.ChestDistance
+ProximityESP.Distance = saved.ProximityDistance
+MobESP.Distance = saved.MobDistance
+MobESP.Highlight = saved.MobHighlight
+MobESP.Color = GetSavedMobColor()
+
+Sections.Settings:NewOptionGroup("Player ESP", {
+	{name = "Enable", type = "toggle"},
+	{name = "Name", type = "toggle"},
+	{name = "Level", type = "toggle"},
+	{name = "Guild", type = "toggle"},
+	{name = "Distance", type = "toggle"},
+	{name = "Health", type = "toggle"},
+	{name = "Box", type = "toggle"},
+	{name = "HealthBar", type = "toggle"},
+	{name = "StomachBar", type = "toggle"},
+	{name = "WaterBar", type = "toggle"},
+	{name = "EtherBar", type = "toggle"},
+	{name = "PostureBar", type = "toggle"},
+	{name = "BloodBar", type = "toggle"},
+	{name = "ArmorBar", type = "toggle"},
+	{name = "SanityBar", type = "toggle"},
+	{name = "ESP Distance", type = "slider", min = 100, max = 50000, default = EspData.Distance},
+	{name = "ESP Size", type = "sliderf", min = 0.5, max = 3, default = EspData.Size, decimals = 1},
+	{name = "ESP Color", type = "colorpicker", defaultColor = GetSavedColor()},
+	{name = "Player Proximity", type = "toggle"},
+	{name = "Proximity Distance", type = "slider", min = 1, max = 5000, default = ProximityESP.Distance},
+}, {
+	Enable = saved.Enable,
+	Name = saved.Name,
+	Level = saved.Level,
+	Guild = saved.Guild,
+	Distance = saved.Distance,
+	Health = saved.Health,
+	Box = saved.Box,
+	HealthBar = saved.HealthBar,
+	StomachBar = saved.StomachBar,
+	WaterBar = saved.WaterBar,
+	EtherBar = saved.EtherBar,
+	PostureBar = saved.PostureBar,
+	BloodBar = saved.BloodBar,
+	ArmorBar = saved.ArmorBar,
+	SanityBar = saved.SanityBar,
+	["Player Proximity"] = saved.ProximityESP,
+}, function(opt, state, sliderVal, all)
+	if not Alive then return end
+	if opt == "Enable" then
+		Save:SetValue("esp_enable", state)
+		if state then EnableESP() else DisableESP() end
+	elseif opt == "Name" then EspData.ShowName = state; Save:SetValue("esp_name", state)
+	elseif opt == "Level" then EspData.ShowLevel = state; Save:SetValue("esp_level", state)
+	elseif opt == "Guild" then EspData.ShowGuild = state; Save:SetValue("esp_guild", state)
+	elseif opt == "Distance" then EspData.ShowDistance = state; Save:SetValue("esp_distance", state)
+	elseif opt == "Health" then EspData.ShowHealth = state; Save:SetValue("esp_health", state)
+	elseif opt == "Box" then EspData.ShowBox = state; Save:SetValue("esp_box", state); RefreshESPBars()
+	elseif opt == "HealthBar" then EspData.ShowHealthBar = state; Save:SetValue("esp_healthbar", state); RefreshESPBars()
+	elseif opt == "StomachBar" then EspData.ShowStomachBar = state; Save:SetValue("esp_stomachbar", state); RefreshESPBars()
+	elseif opt == "WaterBar" then EspData.ShowWaterBar = state; Save:SetValue("esp_waterbar", state); RefreshESPBars()
+	elseif opt == "EtherBar" then EspData.ShowEtherBar = state; Save:SetValue("esp_etherbar", state); RefreshESPBars()
+	elseif opt == "PostureBar" then EspData.ShowPostureBar = state; Save:SetValue("esp_posturebar", state); RefreshESPBars()
+	elseif opt == "BloodBar" then EspData.ShowBloodBar = state; Save:SetValue("esp_bloodbar", state); RefreshESPBars()
+	elseif opt == "ArmorBar" then EspData.ShowArmorBar = state; Save:SetValue("esp_armorbar", state); RefreshESPBars()
+	elseif opt == "SanityBar" then EspData.ShowSanityBar = state; Save:SetValue("esp_sanitybar", state); RefreshESPBars()
+	elseif opt == "ESP Distance" then EspData.Distance = sliderVal; Save:SetValue("esp_maxdist", sliderVal)
+	elseif opt == "ESP Size" then
+		EspData.Size = sliderVal
+		Save:SetValue("esp_size", sliderVal)
+		for _, pd in pairs(EspData.PerPlayer) do
+			if pd.billboard and pd.label then szP(pd.billboard, pd.label) end
+		end
+	elseif opt == "ESP Color" then
+		local c = all and all["ESP Color"] and all["ESP Color"].colorValue
+		if c then
+			EspData.Color = c
+			Save:SetValue("esp_color", {R = c.R, G = c.G, B = c.B})
+		end
+	elseif opt == "Player Proximity" then
+		Save:SetValue("proximity_enable", state)
+		if state then EnableProximityESP() else DisableProximityESP() end
+	elseif opt == "Proximity Distance" then
+		ProximityESP.Distance = sliderVal
+		Save:SetValue("proximity_distance", sliderVal)
+	end
+end)
+
+Sections.Settings:NewOptionGroup("Chest/Loot ESP", {
+	{name = "Enable", type = "toggle"},
+	{name = "Distance", type = "slider", min = 100, max = 10000, default = ChestESP.Distance},
+}, {
+	Enable = saved.ChestESP,
+}, function(opt, state, sliderVal)
+	if not Alive then return end
+	if opt == "Enable" then
+		Save:SetValue("chest_esp_enable", state)
+		if state then EnableChestESP() else DisableChestESP() end
+	elseif opt == "Distance" then
+		ChestESP.Distance = sliderVal
+		Save:SetValue("chest_esp_distance", sliderVal)
+	end
+end)
+
+Sections.Removals:NewToggle("No Fall Damage", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("nofall_enable", state)
+	if state then EnableNoFallDamage() else DisableNoFallDamage() end
+end, saved.NoFall)
+
+Sections.Removals:NewToggle("No Fog", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("nofog_enable", state)
+	if state then EnableNoFog() else DisableNoFog() end
+end, saved.NoFog)
+
+Sections.Removals:NewToggle("Unlock Chat", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("unlockchat_enable", state)
+	if state then EnableUnlockChat() else DisableUnlockChat() end
+end, saved.UnlockChat)
+
+Sections.Settings:NewOptionGroup("Mob ESP", {
+	{name = "Enable", type = "toggle"},
+	{name = "Highlight", type = "toggle"},
+	{name = "Mob Distance", type = "slider", min = 100, max = 10000, default = MobESP.Distance},
+	{name = "Mob Color", type = "colorpicker", defaultColor = GetSavedMobColor()},
+}, {
+	Enable = saved.MobESP,
+	Highlight = saved.MobHighlight,
+}, function(opt, state, sliderVal, all)
+	if not Alive then return end
+	if opt == "Enable" then
+		Save:SetValue("mob_esp_enable", state)
+		if state then EnableMobESP() else DisableMobESP() end
+	elseif opt == "Highlight" then
+		MobESP.Highlight = state
+		Save:SetValue("mob_esp_highlight", state)
+		ApplyMobHighlights()
+	elseif opt == "Mob Distance" then
+		MobESP.Distance = sliderVal
+		Save:SetValue("mob_esp_distance", sliderVal)
+	elseif opt == "Mob Color" then
+		local c = all and all["Mob Color"] and all["Mob Color"].colorValue
+		if c then
+			MobESP.Color = c
+			Save:SetValue("mob_esp_color", {R = c.R, G = c.G, B = c.B})
+			ApplyMobESPColor()
+		end
+	end
+end)
+
+local flyTog = Sections.Player:NewToggle("Fly", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("fly_enable", state)
+	if state then EnableFly() else DisableFly() end
+end, saved.Fly)
+
+Sections.Player:NewKeybind("Fly Bind", Move.FlyBind, function(key)
+	if not Alive then return end
+	if typeof(key) == "EnumItem" then
+		Move.FlyBind = key.Name
+		Save:SetValue("fly_bind", key.Name)
+	end
+end)
+
+Sections.Player:NewSlider("Fly Speed", 1, 250, Move.FlySpeed, function(v)
+	if not Alive then return end
+	Move.FlySpeed = v
+	Save:SetValue("fly_speed", v)
+end)
+
+local noclipTog = Sections.Player:NewToggle("Noclip", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("noclip_enable", state)
+	if state then EnableNoclip() else DisableNoclip() end
+end, saved.Noclip)
+
+Sections.Player:NewToggle("Full Noclip", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("fullnoclip_enable", state)
+	Move.FullNoclip = state
+	if not state then RestoreWorldParts() end
+end, saved.FullNoclip)
+
+Sections.Player:NewKeybind("Noclip Bind", Move.NoclipBind, function(key)
+	if not Alive then return end
+	if typeof(key) == "EnumItem" then
+		Move.NoclipBind = key.Name
+		Save:SetValue("noclip_bind", key.Name)
+	end
+end)
+
+Sections.VoidMob:NewToggle("Void Mob", nil, function(state)
+	if not Alive then return end
+	Save:SetValue("voidmob_enable", state)
+	VoidMob.Enabled = state
+	if state then StartVoidMob() else StopVoidMob() end
+end, Save:GetValue("voidmob_enable", false))
+
+if Save:GetValue("voidmob_enable", false) then
+	VoidMob.Enabled = true
+	StartVoidMob()
+end
+
+Sections.VoidTitus:NewButton("Void Titus", "Void Titus", function()
+	local character = LP.Character
+	if not character then return end
+
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local titus
+	local liveFolder = workspace:FindFirstChild("Live")
+	if not liveFolder then return end
+
+	for _, v in ipairs(liveFolder:GetChildren()) do
+		if string.find(string.lower(v.Name), "titus") then
+			titus = v
+			break
+		end
+	end
+
+	if not titus then return end
+
+	local targetRoot = titus:FindFirstChild("HumanoidRootPart")
+	if not targetRoot then return end
+
+	local wasNoclip = Move.Noclip
+	if not Move.Noclip then
+		EnableNoclip()
+		if noclipTog and noclipTog.Set then noclipTog:Set(true) end
+	end
+
+	local breakerHeartbeat
+	local breakerRender
+	local savedVelocity
+
+	breakerHeartbeat = RunService.Heartbeat:Connect(function()
+		local char = LP.Character
+		if not char then return end
+
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+
+		savedVelocity = hrp.AssemblyLinearVelocity
+		hrp.AssemblyLinearVelocity = Vector3.new(0, -9e9, 0)
+	end)
+
+	breakerRender = RunService.PreRender:Connect(function()
+		if not savedVelocity then return end
+
+		local char = LP.Character
+		if not char then return end
+
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+
+		hrp.AssemblyLinearVelocity = savedVelocity
+	end)
+
+	task.wait()
+
+	local offset = CFrame.new(0, -1, 0)
+
+	local tween = TweenService:Create(
+		root,
+		TweenInfo.new(3, Enum.EasingStyle.Linear),
+		{
+			CFrame = targetRoot.CFrame * offset
+		}
+	)
+
+	tween:Play()
+
+	task.delay(2.55, function()
+		local VirtualInputManager = game:GetService("VirtualInputManager")
+
+		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+		task.wait(0.5)
+		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+	end)
+
+	tween.Completed:Wait()
+
+	local start = tick()
+
+	while tick() - start < 1.3 do
+		if not targetRoot.Parent then
+			break
+		end
+
+		root.CFrame = targetRoot.CFrame * offset
+		RunService.Heartbeat:Wait()
+	end
+
+	if breakerHeartbeat then
+		breakerHeartbeat:Disconnect()
+		breakerHeartbeat = nil
+	end
+
+	if breakerRender then
+		breakerRender:Disconnect()
+		breakerRender = nil
+	end
+
+	savedVelocity = nil
+
+	if not wasNoclip then
+		DisableNoclip()
+		Save:SetValue("noclip_enable", false)
+		if noclipTog and noclipTog.Set then noclipTog:Set(false) end
+	end
+end, { Confirm = true, ConfirmMessage = "Seguro que quieres voidear a Titus?" })
+
+local placeId = game.PlaceId
+
+if placeId == 6032399813 then
+	Sections.Teleports:NewButton("Eastern Luminant", nil, function()
+		if TeleportState.Current == "Etrean" then
+			StopTeleportLoop("Etrean")
+			TeleportState.Current = nil
+		else
+			StopAllTeleportLoops()
+			StartTeleportLoop("Etrean", Vector3.new(-2637.456298828125, 721.6329345703125 - 90, -6722.51953125))
+		end
+	end)
+
+	Sections.Teleports:NewButton("The Depths", nil, function()
+		StopAllTeleportLoops()
+		local depthsPos = Vector3.new(39911.3672, 39980.9375, 39708.3203)
+		StartTeleportLoop("Depths", depthsPos)
+		LP.CharacterAdded:Connect(function()
+			if TeleportState.Current == "Depths" then
+				task.wait(1)
+				StartTeleportLoop("Depths", depthsPos)
+			end
+		end)
+	end)
+
+	Sections.Teleports:NewButton("Trial Of One", nil, function()
+		StopAllTeleportLoops()
+		local trialPos = Vector3.new(-959.7876586914062, 146.99688720703125, -6659.63037109375)
+		StartTeleportLoop("TrialOfOne", trialPos)
+		LP.CharacterAdded:Connect(function()
+			if TeleportState.Current == "TrialOfOne" then
+				task.wait(1)
+				StartTeleportLoop("TrialOfOne", trialPos)
+			end
+		end)
+	end)
+
+	Sections.Teleports:NewButton("Stop Teleport", nil, function()
+		StopAllTeleportLoops()
+	end)
+
+elseif placeId == 6473861193 then
+	Sections.Teleports:NewButton("Etrean Luminant", nil, function()
+		if TeleportState.Current == "Etrean" then
+			StopTeleportLoop("Etrean")
+			TeleportState.Current = nil
+		else
+			StopAllTeleportLoops()
+			StartTeleportLoop("Etrean", Vector3.new(-514.2630004882812, 665.17431640625 - 50, -4772.32080078125))
+		end
+	end)
+
+	Sections.Teleports:NewButton("The Depths", nil, function()
+		StopAllTeleportLoops()
+		local depthsPos = Vector3.new(39911.3672, 39980.9375, 39708.3203)
+		StartTeleportLoop("Depths", depthsPos)
+		LP.CharacterAdded:Connect(function()
+			if TeleportState.Current == "Depths" then
+				task.wait(1)
+				StartTeleportLoop("Depths", depthsPos)
+			end
+		end)
+	end)
+
+	Sections.Teleports:NewButton("Stop Teleport", nil, function()
+		StopAllTeleportLoops()
+	end)
+end
+
+InputConn = UserInputService.InputBegan:Connect(function(input, gp)
+	if not Alive then return end
+	if gp or input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	local kn = input.KeyCode.Name
+	if kn == Move.FlyBind then
+		Move.Fly = not Move.Fly
+		Save:SetValue("fly_enable", Move.Fly)
+		if Move.Fly then
+			EnableFly()
+			if flyTog and flyTog.Set then flyTog:Set(true) end
+		else
+			DisableFly()
+			if flyTog and flyTog.Set then flyTog:Set(false) end
+		end
+	end
+	if kn == Move.NoclipBind then
+		Move.Noclip = not Move.Noclip
+		Save:SetValue("noclip_enable", Move.Noclip)
+		if Move.Noclip then
+			EnableNoclip()
+			if noclipTog and noclipTog.Set then noclipTog:Set(true) end
+		else
+			DisableNoclip()
+			if noclipTog and noclipTog.Set then noclipTog:Set(false) end
+		end
+	end
+end)
+
+if saved.Enable then EnableESP() end
+if saved.Fly then EnableFly() end
+if saved.Noclip then EnableNoclip() end
+if saved.NoFall then EnableNoFallDamage() end
+if saved.NoFog then EnableNoFog() end
+if saved.UnlockChat then EnableUnlockChat() end
+if saved.MobESP then EnableMobESP() end
+if saved.ChestESP then EnableChestESP() end
+if saved.ProximityESP then EnableProximityESP() end
+
+local themeNames = Library:GetThemes()
+local savedTheme = Save:GetValue("theme", "Dark")
+local themeDefault = table.find(themeNames, savedTheme) and savedTheme or themeNames[1]
+
+local ThemeDropdown = Sections.Config:NewDropdown("Theme", themeNames, themeDefault, function(opt)
+	Save:SetValue("theme", opt)
+	Library.ChangeTheme(opt)
+end)
+
+Sections.Config:NewButton("Create Custom Theme", nil, function()
+	Library:OpenThemeEditor(function(name)
+		if not name then return end
+		ThemeDropdown:Update(Library:GetThemes(), name)
+		Save:SetValue("theme", name)
+		Library.ChangeTheme(name)
+	end)
+end)
+
+Sections.Config:NewButton("Save Config", nil, function()
+	if not Alive then return end
+	Save:Save(Config.Name)
+end)
+
+Sections.Config:NewButton("Delete Config", nil, function()
+	if not Alive then return end
+	pcall(function()
+		delfile(Config.Folder .. "/" .. Config.Name .. ".json")
+	end)
+	Save:Clear()
+	DisableESP()
+	DisableChestESP()
+	DisableProximityESP()
+	DisableFly()
+	DisableNoclip()
+	DisableNoFallDamage()
+	DisableNoFog()
+	DisableUnlockChat()
+	DisableMobESP()
+	StopVoidMob()
+	StopAllTeleportLoops()
+end, { Confirm = true, ConfirmMessage = "Seguro que quieres eliminar esta config?" })
+
+Library.OnClose(FullCleanup)
+
+task.defer(function()
+	local parent = (gethui and gethui()) or game:GetService("CoreGui")
+	local function hook(gui)
+		if not gui or not gui:IsA("ScreenGui") then return end
+		if string.find(gui.Name, "Meow_") then
+			gui.Destroying:Connect(FullCleanup)
+			return true
+		end
+	end
+	for _, gui in ipairs(parent:GetChildren()) do
+		if hook(gui) then break end
+	end
+	parent.ChildAdded:Connect(function(child)
+		task.defer(function() hook(child) end)
+	end)
+end)
